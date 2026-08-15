@@ -1,0 +1,330 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>Clockwork Hollow - HTML Prototype</title>
+<style>
+  html,body { height:100%; margin:0; background:#111; color:#ddd; font-family:system-ui,Segoe UI,Roboto,Helvetica,Arial; }
+  #game { display:block; margin:16px auto; background:#061020; box-shadow:0 6px 24px rgba(0,0,0,0.8); }
+  .ui { width:720px; margin:6px auto; display:flex; gap:12px; align-items:center; justify-content:space-between; color:#ddd;}
+  .bar { height:12px; width:220px; background:#222; border:1px solid #333; border-radius:3px; overflow:hidden; }
+  .bar > .fill { height:100%; background:linear-gradient(90deg,#7ad,#3aa); width:0%; }
+  .bar.energy > .fill { background:linear-gradient(90deg,#ffb86b,#ff7a3d); }
+  .hint { color:#9aa; font-size:13px; }
+</style>
+</head>
+<body>
+<canvas id="game" width="720" height="360"></canvas>
+<div class="ui" style="width:720px">
+  <div style="display:flex;gap:12px;align-items:center">
+    <div>Health</div>
+    <div class="bar health"><div class="fill" style="width:100%"></div></div>
+    <div>Energy</div>
+    <div class="bar energy"><div class="fill" style="width:100%"></div></div>
+  </div>
+  <div class="hint">Move: A/D or ←→ • Jump: Space • Dash: Shift • Time‑Shift: Q</div>
+</div>
+
+<script>
+// --- Simple HTML5 prototype implementing time-shift and basic platformer ---
+// Controls
+const KEYS = {};
+addEventListener("keydown", e => { KEYS[e.key.toLowerCase()] = true; if ([" ","q"].includes(e.key.toLowerCase())) e.preventDefault(); });
+addEventListener("keyup",   e => { KEYS[e.key.toLowerCase()] = false; });
+
+// Canvas
+const canvas = document.getElementById("game");
+const ctx = canvas.getContext("2d");
+const W = canvas.width, H = canvas.height;
+
+// UI bars
+const healthFill = document.querySelector(".bar.health .fill");
+const energyFill = document.querySelector(".bar.energy .fill");
+
+// TimeManager
+const TimeManager = {
+  isEcho: false,
+  energy: 100,
+  maxEnergy: 100,
+  toggleCost: 30,
+  regenRate: 14, // per second
+  lastToggleAt: 0,
+  canToggle() { return this.energy >= this.toggleCost; },
+  toggle() {
+    if (!this.canToggle()) return false;
+    this.energy -= this.toggleCost;
+    this.isEcho = !this.isEcho;
+    this.lastToggleAt = performance.now();
+    return true;
+  },
+  update(dt) {
+    if (this.energy < this.maxEnergy) this.energy = Math.min(this.maxEnergy, this.energy + this.regenRate * dt);
+  }
+};
+
+// Basic rectangle collision
+function rectsOverlap(a,b){
+  return a.x < b.x+b.w && a.x+a.w > b.x && a.y < b.y+b.h && a.y+a.h > b.y;
+}
+
+// Level objects
+const platforms = [
+  // ground
+  { x:0, y:320, w:720, h:40, echo:false, color:"#2b4" },
+  // regular platform
+  { x:120, y:240, w:120, h:14, echo:false, color:"#446" },
+  // an echo-only platform bridging a gap
+  { x:300, y:200, w:140, h:14, echo:true, color:"#5b4" },
+  // another echo-only higher platform
+  { x:480, y:160, w:100, h:14, echo:true, color:"#5b4" }
+];
+
+// Enemy class (patrols on top of its assigned platform)
+class Enemy {
+  constructor(x,y,patrolMinX,patrolMaxX,color="#e85") {
+    this.x=x; this.y=y; this.w=28; this.h=28;
+    this.vx=40; this.dir=1; this.pmin=patrolMinX; this.pmax=patrolMaxX;
+    this.color=color; this.echoOnly=true; this.alive=true;
+  }
+  update(dt) {
+    if (!this.alive) return;
+    if (this.echoOnly && !TimeManager.isEcho) return; // inactive/invisible in present
+    this.x += this.vx * this.dir * dt;
+    if (this.x < this.pmin) { this.x = this.pmin; this.dir = 1; }
+    if (this.x > this.pmax) { this.x = this.pmax; this.dir = -1; }
+  }
+  rect(){ return {x:this.x,y:this.y,w:this.w,h:this.h}; }
+  draw(ctx) {
+    if (this.echoOnly && !TimeManager.isEcho) return;
+    ctx.fillStyle = this.color;
+    ctx.fillRect(this.x, this.y, this.w, this.h);
+    // simple eyes
+    ctx.fillStyle="#111"; ctx.fillRect(this.x+6, this.y+8,4,4); ctx.fillRect(this.x+18,this.y+8,4,4);
+  }
+}
+
+const enemies = [
+  // place an enemy that walks across the echo platform
+  new Enemy(320, 200-28, 300, 420, "#f06")
+];
+
+// Player
+const player = {
+  x:64, y:240, w:20, h:36,
+  vx:0, vy:0,
+  speed:200,
+  gravity:1200,
+  jumpVel:-460,
+  onGround:false,
+  facing:1,
+  dashSpeed:560,
+  dashTime:0.12,
+  dashTimer:0,
+  dashCooldown:0.45,
+  dashCooldownTimer:0
+};
+
+// Simple game state
+let last = performance.now();
+
+// Main loop
+function loop(now){
+  const dt = Math.min(1/30, (now - last)/1000);
+  last = now;
+  update(dt);
+  draw();
+  requestAnimationFrame(loop);
+}
+
+// Update
+function update(dt){
+  // TimeManager energy regen
+  TimeManager.update(dt);
+
+  // Input -> time-shift toggle (Q)
+  if (KEYS["q"] && !KEYS._qLock) {
+    if (TimeManager.toggle()) {
+      // small flash effect or sound could go here
+    }
+    KEYS._qLock = true;
+  }
+  if (!KEYS["q"]) KEYS._qLock = false;
+
+  // Horizontal movement
+  const left = KEYS["a"] || KEYS["arrowleft"];
+  const right = KEYS["d"] || KEYS["arrowright"];
+  let dir = 0;
+  if (left) dir -= 1;
+  if (right) dir += 1;
+
+  // Dash
+  if (KEYS["shift"] && !KEYS._dashLock && player.dashCooldownTimer <= 0) {
+    // Start dash
+    player.dashTimer = player.dashTime;
+    player.dashCooldownTimer = player.dashCooldown;
+    player.vx = player.dashSpeed * (dir !== 0 ? dir : (player.facing || 1));
+    player.vy = 0;
+    KEYS._dashLock = true;
+  }
+  if (!KEYS["shift"]) KEYS._dashLock = false;
+
+  // Movement & physics
+  if (player.dashTimer > 0) {
+    player.dashTimer -= dt;
+    // maintain dash vx, no horizontal input
+    player.onGround = false;
+  } else {
+    // normal control
+    player.vx = dir * player.speed;
+    // jump - only when on ground and pressed space
+    if ( (KEYS[" "] || KEYS["space"]) && player.onGround && !KEYS._jumpLock ) {
+      player.vy = player.jumpVel;
+      player.onGround = false;
+      KEYS._jumpLock = true;
+    }
+    if (!(KEYS[" "] || KEYS["space"])) KEYS._jumpLock = false;
+  }
+  if (player.dashCooldownTimer > 0) player.dashCooldownTimer -= dt;
+
+  // gravity
+  player.vy += player.gravity * dt;
+
+  // integrate, with collision resolution
+  player.x += player.vx * dt;
+  resolveCollisions(player, true); // resolve X
+  player.y += player.vy * dt;
+  player.onGround = false;
+  resolveCollisions(player, false); // resolve Y
+
+  // update facing
+  if (player.vx > 0.1) player.facing = 1;
+  if (player.vx < -0.1) player.facing = -1;
+
+  // enemy updates
+  enemies.forEach(e => e.update(dt));
+
+  // enemy-player simple collision (damage)
+  enemies.forEach(e => {
+    if (!e.alive) return;
+    if (e.echoOnly && !TimeManager.isEcho) return;
+    if (rectsOverlap(playerRect(), e.rect())) {
+      // simple knockback and health reduce
+      player.vx = -player.facing * 220;
+      player.vy = -260;
+      // For prototype, just log or flash - not tracking health now.
+    }
+  });
+
+  // UI updates
+  const healthPct = 100; // placeholder, static
+  const energyPct = Math.round(100 * (TimeManager.energy / TimeManager.maxEnergy));
+  healthFill.style.width = `${healthPct}%`;
+  energyFill.style.width = `${energyPct}%`;
+}
+
+// Resolve collisions with platforms.
+// If horizontal pass (isX=true), only resolve X overlaps; if false, resolve Y and set onGround.
+function resolveCollisions(obj, isX){
+  for (let p of platforms) {
+    if (p.echo && !TimeManager.isEcho) continue; // invisible in current time layer
+    const plat = {x:p.x, y:p.y, w:p.w, h:p.h};
+    if (!rectsOverlap(obj, plat)) continue;
+    // compute overlap
+    const ox = (obj.x + obj.w) - plat.x;
+    const ox2 = (plat.x + plat.w) - obj.x;
+    const oy = (obj.y + obj.h) - plat.y;
+    const oy2 = (plat.y + plat.h) - obj.y;
+    if (isX) {
+      // choose smaller overlap in X
+      const moveLeft = ox2 < ox;
+      if (moveLeft) {
+        obj.x = plat.x + plat.w;
+      } else {
+        obj.x = plat.x - obj.w;
+      }
+      obj.vx = 0;
+    } else {
+      // resolve Y
+      const moveUp = oy2 < oy;
+      if (moveUp) {
+        // push down
+        obj.y = plat.y + plat.h;
+        obj.vy = 0;
+      } else {
+        // landed on top
+        obj.y = plat.y - obj.h;
+        obj.vy = 0;
+        obj.onGround = true;
+      }
+    }
+  }
+}
+
+// Drawing
+function draw(){
+  ctx.clearRect(0,0,W,H);
+  // background
+  const grad = ctx.createLinearGradient(0,0,0,H);
+  grad.addColorStop(0, TimeManager.isEcho ? "#1b0a2a" : "#061020");
+  grad.addColorStop(1, TimeManager.isEcho ? "#0e1020" : "#08121a");
+  ctx.fillStyle = grad;
+  ctx.fillRect(0,0,W,H);
+
+  // draw platforms
+  for (let p of platforms) {
+    const visible = !p.echo || TimeManager.isEcho;
+    // echo objects are slightly emissive and oscillate when visible
+    ctx.globalAlpha = visible ? 1 : 0.18;
+    ctx.fillStyle = p.echo ? (TimeManager.isEcho ? "#7dd": "#2d3") : p.color;
+    ctx.fillRect(p.x, p.y, p.w, p.h);
+    // edge
+    ctx.strokeStyle = "#00000055";
+    ctx.strokeRect(p.x+0.5, p.y+0.5, p.w-1, p.h-1);
+    ctx.globalAlpha = 1;
+    if (p.echo) {
+      // hint glow when echo active
+      if (TimeManager.isEcho) {
+        ctx.fillStyle = "rgba(120,200,255,0.03)";
+        ctx.fillRect(p.x-6, p.y-8, p.w+12, p.h+16);
+      }
+    }
+  }
+
+  // draw enemies
+  enemies.forEach(e => e.draw(ctx));
+
+  // draw player
+  ctx.save();
+  // flash tint when in Echo? subtle
+  if (TimeManager.isEcho) ctx.filter = "brightness(1.04) saturate(1.05)";
+  ctx.fillStyle = "#9cf";
+  ctx.fillRect(player.x, player.y, player.w, player.h);
+  // simple eyes and cape
+  ctx.fillStyle = "#084";
+  ctx.fillRect(player.x + (player.facing>0?2:player.w-6), player.y + 8, 4, 4);
+  ctx.restore();
+
+  // HUD overlays
+  // small text
+  ctx.fillStyle = "#cde";
+  ctx.font = "12px system-ui,Segoe UI,Roboto";
+  ctx.fillText("Time: " + (TimeManager.isEcho ? "Echo (Past)" : "Present"), 10, 18);
+  ctx.fillText("Energy: " + Math.round(TimeManager.energy), 10, 34);
+  // draw energy regen indicator
+  const cooldownPct = Math.max(0, Math.min(1, (player.dashCooldownTimer / player.dashCooldown)));
+  ctx.fillStyle = "#fff3";
+  ctx.fillRect(W-120, 10, 100, 6);
+  ctx.fillStyle = "#f90";
+  ctx.fillRect(W-120, 10, 100*(1-cooldownPct), 6);
+}
+
+// small helper to get player rect
+function playerRect(){ return {x:player.x, y:player.y, w:player.w, h:player.h}; }
+
+// initialize position & start
+player.x = 48; player.y = 200;
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>
